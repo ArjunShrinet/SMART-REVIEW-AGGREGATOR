@@ -5,6 +5,11 @@ from app.services.link_parser import extract_product_name
 from app.services.reddit_scraper import get_reddit_reviews
 from app.services.ai_summarizer import summarize_reviews
 from app.services.price_scraper import get_best_prices
+import os
+from serpapi import GoogleSearch
+from dotenv import load_dotenv
+
+load_dotenv()
 
 router = APIRouter()
 
@@ -41,4 +46,32 @@ def get_prices(request: PriceRequest):
     return {
         "product": request.product_name,
         "prices": prices
+    }
+
+@router.post("/debug-prices")
+def debug_prices(request: PriceRequest):
+    """
+    Temporary debug endpoint — shows raw SerpAPI response
+    so we can see exactly what URL fields are returned.
+    Visit: POST http://127.0.0.1:8000/debug-prices
+    """
+    api_key = os.getenv("SERPAPI_KEY")
+    params = {
+        "engine": "google_shopping",
+        "q": request.product_name,
+        "api_key": api_key,
+        "gl": "in",
+        "hl": "en",
+        "num": "5",
+    }
+    search = GoogleSearch(params)
+    results = search.get_dict()
+    shopping = results.get("shopping_results", [])
+
+    # Return first 3 raw items so we can inspect all fields
+    return {
+        "raw_items": [
+            {k: v for k, v in item.items()}
+            for item in shopping[:3]
+        ]
     }

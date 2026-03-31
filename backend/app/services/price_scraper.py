@@ -1,9 +1,19 @@
 import os
-from urllib.parse import quote
+import re
+from urllib.parse import quote, unquote
 from dotenv import load_dotenv
 from serpapi import GoogleSearch
 
 load_dotenv()
+
+# ── Trusted Indian stores ─────────────────────────────────────────────────────
+
+TRUSTED_STORES = [
+    "amazon", "flipkart", "croma", "reliance digital",
+    "vijay sales", "tatacliq", "myntra", "snapdeal",
+    "samsung", "apple", "mi store", "oneplus",
+    "jiomart", "nykaa", "ajio", "meesho", "shopclues", "boat",
+]
 
 STORE_LOGOS = {
     "amazon":           "🛒",
@@ -15,6 +25,15 @@ STORE_LOGOS = {
     "myntra":           "🛍️",
     "meesho":           "🟣",
     "snapdeal":         "💠",
+    "samsung":          "🔷",
+    "apple":            "🍎",
+    "mi store":         "🟠",
+    "oneplus":          "🔴",
+    "boat":             "🎧",
+    "jiomart":          "🔵",
+    "nykaa":            "🩷",
+    "ajio":             "👗",
+    "shopclues":        "🛍️",
 }
 
 STORE_SEARCH_URLS = {
@@ -27,7 +46,18 @@ STORE_SEARCH_URLS = {
     "myntra":           "https://www.myntra.com/",
     "meesho":           "https://www.meesho.com/search?q=",
     "snapdeal":         "https://www.snapdeal.com/search?keyword=",
+    "samsung":          "https://www.samsung.com/in/search/?searchvalue=",
+    "apple":            "https://www.apple.com/in/search/",
+    "jiomart":          "https://www.jiomart.com/search#q=",
+    "nykaa":            "https://www.nykaa.com/search/result/?q=",
+    "ajio":             "https://www.ajio.com/search/?text=",
+    "shopclues":        "https://www.shopclues.com/search?q=",
 }
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def is_trusted(source: str) -> bool:
+    return any(store in source.lower() for store in TRUSTED_STORES)
 
 def get_logo(source: str) -> str:
     for key, logo in STORE_LOGOS.items():
@@ -35,57 +65,84 @@ def get_logo(source: str) -> str:
             return logo
     return "🏷️"
 
-def build_fallback_url(source: str, product_name: str) -> str:
-    """Build a direct search URL for a known store."""
+def build_store_search_url(source: str, product_name: str) -> str:
     encoded = quote(product_name)
-    for key, url in STORE_SEARCH_URLS.items():
+    for key, base_url in STORE_SEARCH_URLS.items():
         if key in source.lower():
-            return url + encoded
-    # Unknown store — search Google for it
+            return base_url + encoded
     return f"https://www.google.com/search?q={quote(product_name + ' ' + source)}"
 
-def clean_url(url: str, source: str, product_name: str) -> str:
+def extract_direct_url(item: dict, source: str, product_name: str) -> str:
+    candidates = []
+    for field in ["product_link", "store_link", "link"]:
+        val = item.get(field, "")
+        if val and isinstance(val, str):
+            candidates.append(val)
+
+    for url in candidates:
+        if not url or url in ("null", "None", ""):
+            continue
+        if "serpapi.com" in url:
+            continue
+        if "/url?q=" in url:
+            try:
+                extracted = unquote(url.split("/url?q=")[1].split("&")[0])
+                if extracted.startswith("http") and "google.com" not in extracted:
+                    return extracted
+            except:
+                continue
+        if url.startswith("http") and "google.com" not in url:
+            return url
+
+    return build_store_search_url(source, product_name)
+
+def title_matches_product(title: str, product_name: str) -> bool:
     """
-    SerpAPI returns Google redirect URLs like:
-    /url?q=https://amazon.in/...
-    or https://www.google.com/shopping/...
-    
-    Extract the actual destination URL.
+    Check if the result title actually matches the product searched.
+    Strips common noise words and checks keyword overlap.
     """
-    if not url:
-        return build_fallback_url(source, product_name)
+    NOISE = {
+        "buy", "online", "best", "price", "india", "new", "latest",
+        "with", "and", "for", "the", "in", "at", "on", "of", "a",
+        "inch", "cm", "gb", "tb", "mb", "ram", "rom", "pack", "combo",
+        "review", "sale", "offer", "discount", "deal", "get", "shop",
+    }
 
-    # Already a direct store URL
-    if url.startswith("http") and "google.com" not in url:
-        return url
+    def clean_words(text):
+        words = re.sub(r'[^a-z0-9\s]', ' ', text.lower()).split()
+        return {w for w in words if w not in NOISE and len(w) > 1}
 
-    # Google redirect: /url?q=https://...
-    if "/url?q=" in url:
-        try:
-            actual = url.split("/url?q=")[1].split("&")[0]
-            if actual.startswith("http"):
-                return actual
-        except:
-            pass
+    product_words = clean_words(product_name)
+    title_words   = clean_words(title)
 
-    # Relative URL or google.com URL — use fallback
-    return build_fallback_url(source, product_name)
+    if not product_words:
+        return True
 
+    # Count how many product keywords appear in the title
+    matches = product_words & title_words
+    match_ratio = len(matches) / len(product_words)
+
+    # Need at least 50% of product keywords to appear in title
+    return match_ratio >= 0.5
+
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def get_best_prices(product_name: str) -> list:
     api_key = os.getenv("SERPAPI_KEY")
-
     if not api_key:
         return []
 
     try:
+        # Use exact product name with "buy india" to get specific results
+        search_query = f"{product_name} buy india"
+
         params = {
-            "engine": "google_shopping",
-            "q": product_name,
+            "engine":  "google_shopping",
+            "q":       search_query,
             "api_key": api_key,
-            "gl": "in",
-            "hl": "en",
-            "num": "20",
+            "gl":      "in",
+            "hl":      "en",
+            "num":     "20",
         }
 
         search = GoogleSearch(params)
@@ -95,31 +152,38 @@ def get_best_prices(product_name: str) -> list:
         if not shopping_results:
             return []
 
-        prices = []
+        prices      = []
         seen_stores = set()
 
         for item in shopping_results:
             source = item.get("source", "").strip()
             price  = item.get("extracted_price")
-            title  = item.get("title", product_name)
+            title  = item.get("title", "")
             thumb  = item.get("thumbnail", "")
 
+            # ── Filters ──────────────────────────────────────────────────────
+
+            # Must have price and source
             if not price or not source:
                 continue
+
+            # Must be a trusted store
+            if not is_trusted(source):
+                continue
+
+            # Must not be a duplicate store
             if source.lower() in seen_stores:
                 continue
 
+            # ── KEY FIX: title must actually match the searched product ──────
+            if not title_matches_product(title, product_name):
+                continue
+
+            # ─────────────────────────────────────────────────────────────────
+
             seen_stores.add(source.lower())
 
-            # Try all possible URL fields SerpAPI provides
-            raw_url = (
-                item.get("product_link") or   # direct product page (best)
-                item.get("store_link") or      # store page
-                item.get("link") or            # generic link (often Google redirect)
-                ""
-            )
-
-            direct_url = clean_url(raw_url, source, product_name)
+            direct_url = extract_direct_url(item, source, product_name)
 
             prices.append({
                 "store":         source,
@@ -131,10 +195,8 @@ def get_best_prices(product_name: str) -> list:
                 "thumbnail":     thumb,
             })
 
-        # Sort cheapest first
         prices.sort(key=lambda x: x["price"])
 
-        # Mark best price
         if prices:
             prices[0]["best"] = True
 
